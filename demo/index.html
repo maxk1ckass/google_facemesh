@@ -1,0 +1,358 @@
+<!-- Copyright 2020 Google LLC. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================-->
+
+<head>
+  <!-- Load three.js -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.106.2/build/three.min.js"></script>
+  <!-- Load scatter-gl.js -->
+  <script src="https://cdn.jsdelivr.net/npm/scatter-gl@0.0.1/lib/scatter-gl.min.js"></script>
+  <style>
+    .canvas-wrapper,
+    #scatter-gl-container {
+      display: inline-block;
+      vertical-align: top;
+    }
+
+    #scatter-gl-container {
+      border: solid 1px black;
+      position: relative;
+    }
+
+    /* center the canvas within its wrapper */
+    #scatter-gl-container canvas {
+      transform: translate3d(-50%, -50%, 0);
+      left: 50%;
+      top: 50%;
+      position: absolute;
+    }
+
+    /* Chrome, Safari, Edge, Opera */
+    input::-webkit-outer-spin-button,
+    input::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    /* Firefox */
+    input[type="number"] {
+      -moz-appearance: textfield;
+    }
+
+    .green {
+      color: #008000;
+    }
+
+    #main {
+      max-width: 1000px;
+      margin: auto;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    #controls {
+      margin: 10px auto;
+      text-align: center;
+    }
+
+    #controls button {
+      font-size: 20px;
+      padding: 5px;
+    }
+
+    #controls input {
+      width: 60px;
+    }
+
+    #controls input::placeholder {
+      font-size: 12px;
+    }
+
+    .canvas-wrapper.capture canvas {
+      width: 400px;
+      height: 400px;
+    }
+
+    #capture-predictions {
+      width: 400px;
+      height: 400px;
+      overflow-y: scroll;
+    }
+  </style>
+  <script>
+    // trigger a download
+    function downloadURI(uri, name) {
+      let link = document.createElement("a");
+      link.download = name;
+      link.href = uri;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+    function downloadJson(json) {
+      // get data url
+      function jsonToDataURL(json) {
+        return `data:application/json;base64,${btoa(
+          JSON.stringify(json, null, 2)
+        )}`;
+      }
+
+      // check if the response carries any binary,
+      // if yes, download it (or all of them if there're multiple binaries)
+      try {
+        let dataUrl = jsonToDataURL(json);
+        downloadURI(dataUrl, `predictions-${Date.now()}.json`);
+      } catch (e) {
+        console.log(e);
+      }
+    }
+
+    function matrixDot(A, B) {
+      var result = new Array(A.length)
+        .fill(0)
+        .map((row) => new Array(B[0].length).fill(0));
+
+      return result.map((row, i) => {
+        return row.map((val, j) => {
+          return A[i].reduce((sum, elm, k) => sum + elm * B[k][j], 0);
+        });
+      });
+    }
+
+    function matrixDivide(A, number) {
+      var result = new Array(A.length)
+        .fill(0)
+        .map((row) => new Array(A[0].length).fill(0));
+
+      return result.map((row, i) => {
+        return row.map((val, j) => {
+          return A[i][j] / number;
+        });
+      });
+    }
+
+    function downloadObj(json, useScaledMesh = false, customScales = null) {
+      // get data url
+      function jsonToDataURL(json) {
+        let { mesh, scaledMesh, f } = json;
+
+        // choose a mesh and apply scales
+        let m = useScaledMesh ? scaledMesh : mesh;
+        console.log("before custom scale:", m);
+        if (customScales) {
+          m = matrixDot(m, customScales);
+          console.log("after customScaling:", m);
+        }
+
+        // write scales
+        let vertices = (m ? m : []).map(
+          (triple) => `v ${triple[0]} ${triple[1]} ${triple[2]}`
+        );
+        let objContent = "";
+        objContent += vertices.join("\n");
+
+        // write triangles
+        let face = (f ? f : []).map(
+          (points) => `f ${points[0] + 1} ${points[1] + 1} ${points[2] + 1}`
+        );
+        objContent += "\n" + face.join("\n");
+        return `data:text/plain;base64,${btoa(objContent)}`;
+      }
+
+      // check if the response carries any binary,
+      // if yes, download it (or all of them if there're multiple binaries)
+      try {
+        let dataUrl = jsonToDataURL(json);
+        let filetype = customScales
+          ? `-scaled[${customScales[0][0]},${customScales[1][1]}]`
+          : useScaledMesh
+          ? "-scaled"
+          : "";
+        downloadURI(dataUrl, `facemesh${filetype}-${Date.now()}.obj`);
+      } catch (e) {
+        console.log(e);
+      }
+    }
+
+    const clearCanvas = (canvas) => {
+      let ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    };
+
+    const drawText = (canvas) => {
+      let ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.font = "48px serif";
+      ctx.fillText("Average values =>", 200, 200);
+    };
+
+    window.saveCapturePredictionsJson = () => {
+      downloadJson(window.capturePredictionData);
+    };
+
+    window.saveCapturePredictionsObj = (scaled = true) => {
+      downloadObj(window.capturePredictionData, scaled, null);
+    };
+
+    window.saveCapturePredictionsCustomeObj = () => {
+      let scaleX = document.querySelector("#scale-x").value;
+      let scaleY = document.querySelector("#scale-y").value;
+      scaleX = scaleX ? parseFloat(scaleX) : 1;
+      scaleY = scaleY ? parseFloat(scaleY) : 1;
+      const customScales = [
+        [scaleX, 0, 0],
+        [0, scaleY, 0],
+        [0, 0, 1],
+      ];
+      downloadObj(window.capturePredictionData, false, customScales);
+    };
+
+    window.singleCapture = () => {
+      // reset mesh data
+      window.capturePredictionData = {};
+      window.capturedFrameCount = 0;
+
+      // set capture flag
+      window.captureNextFrame = true;
+    };
+
+    window.continuousCapture = () => {
+      let duration = document.querySelector("#duration").value;
+      let fps = document.querySelector("#fps").value;
+      duration = duration ? parseFloat(duration) : 5;
+      fps = fps ? parseFloat(fps) : 10;
+
+      // reset mesh data
+      window.capturePredictionData = {};
+      window.capturedFrameCount = 0;
+
+      // start the timeout
+      window.endContinuousCapture = new Date(Date.now() + duration * 1000);
+      let interval = window.setInterval(() => {
+        if (new Date() > window.endContinuousCapture) {
+          clearInterval(interval);
+
+          setTimeout(() => {
+            // get average values
+            window.capturePredictionData.mesh = matrixDivide(
+              window.capturePredictionData.mesh,
+              window.capturedFrameCount
+            );
+            window.capturePredictionData.scaledMesh = matrixDivide(
+              window.capturePredictionData.scaledMesh,
+              window.capturedFrameCount
+            );
+
+            // show average values
+            drawText(document.querySelector("#capture-scatter-gl"));
+            clearCanvas(document.querySelector("#capture-frame"));
+
+            document.querySelector(
+              "#capture-predictions"
+            ).innerHTML = JSON.stringify(window.capturePredictionData, null, 2);
+          }, 500);
+        } else {
+          window.captureNextFrame = true;
+        }
+      }, parseInt(1000 / fps));
+    };
+  </script>
+</head>
+<body>
+  <div id="main">
+    <div class="container">
+      <div class="canvas-wrapper">
+        <canvas id="output"></canvas>
+        <video
+          id="video"
+          playsinline
+          style="
+            -webkit-transform: scaleX(-1);
+            transform: scaleX(-1);
+            visibility: hidden;
+            width: auto;
+            height: auto;
+          "
+        ></video>
+      </div>
+      <div id="scatter-gl-container"></div>
+    </div>
+
+    <!-- controls -->
+    <hr />
+    <div id="controls" class="buttons">
+      First
+      <button class="green" onclick="window.singleCapture();">
+        Capture
+      </button>
+      &nbsp;Or
+      <input id="duration" type="number" placeholder="sec(5)" />
+      <input id="fps" type="number" placeholder="fps(10)" />
+      <button class="green" onclick="window.continuousCapture();">
+        Cont Capture
+      </button>
+      Then &nbsp;<button onclick="window.saveCapturePredictionsObj(false);">
+        Save OBJ
+      </button>
+      &nbsp;<button onclick="window.saveCapturePredictionsObj(true);">
+        Scaled OBJ
+      </button>
+      &nbsp;Or
+      <input id="scale-x" type="number" placeholder="scaleX(1)" />
+      <input id="scale-y" type="number" placeholder="scaleY(1)" />
+      <button onclick="window.saveCapturePredictionsCustomeObj();">
+        Custom OBJ
+      </button>
+    </div>
+
+    <!-- capture content -->
+    <div class="container">
+      <div class="canvas-wrapper capture">
+        <table>
+          <thead>
+            <tr>
+              <th>Captured Frame</th>
+              <th>Captured Scatter GL</th>
+              <th>
+                Predictions &nbsp;<button
+                  onclick="window.saveCapturePredictionsJson();"
+                >
+                  Save JSON
+                </button>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>
+                <canvas id="capture-frame"></canvas>
+              </td>
+              <td>
+                <canvas id="capture-scatter-gl"></canvas>
+              </td>
+              <td>
+                <pre id="capture-predictions"></pre>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.6/dat.gui.min.js"></script>
+<script src="index.js"></script>
